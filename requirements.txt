@@ -1,4 +1,7 @@
+ dependabot/pip/torch-2.8.0
+torch==2.8.0
 torch==2.7.0
+ main
 triton==2.0.0
 pytest
 tabulate
