@@ -18,15 +18,10 @@ from typing import Callable, Tuple
 import pytest
 import torch
 
-from conftest import check_all_close, set_seed
+from conftest import assert_all_close, set_seed
 
-from kernl.implementations.cuda_graph import cuda_graphs_wrapper
 from kernl.implementations.linear_layer import linear_layer
-
-
-@pytest.fixture
-def cuda_graphs_pool() -> (int, int):
-    return torch.cuda.graph_pool_handle()
+from kernl.optimizer.cuda_graph import cuda_graphs_wrapper
 
 
 def get_pytorch_activation(activation: str) -> Callable:
@@ -71,7 +66,6 @@ def test_benchmark(
     bias: bool,
     activation: str,
     contiguous: bool,
-    cuda_graphs_pool: (int, int),
 ):
     batch, M, N, K = shape
 
@@ -96,10 +90,10 @@ def test_benchmark(
 
     fn = implementations[implementation](layer_weight, layer_bias, activation)
     if cuda_graphs:
-        run = cuda_graphs_wrapper(model=fn, inputs=[x], pool=cuda_graphs_pool)
+        run = cuda_graphs_wrapper(model=fn, inputs=[x])
         # CUDA graphs wraps output in a tuple
         fn = lambda tensor: run(tensor)[0]  # noqa: E731
 
     value = benchmark(fn, x)
 
-    check_all_close(expected, value.float(), rtol=1e-1, atol=1e-1)
+    assert_all_close(expected, value.float(), rtol=1e-1, atol=1e-1)

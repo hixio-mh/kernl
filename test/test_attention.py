@@ -18,24 +18,15 @@ from typing import Callable
 import pytest
 import torch
 
-from conftest import check_all_close, set_seed
+from conftest import assert_all_close, set_seed
+from src.kernl.implementations.attention_skinny import skinny_attention_forward
 
-from kernl.implementations.attention import attention_forward, attention_reference
-from kernl.implementations.attention_masked_original import masked_attention_forward_original
-from kernl.implementations.attention_original import attention_forward_original
-
-
-def original_triton_flash_attention(is_causal: bool, *args, **kwargs):
-    if is_causal:
-        return masked_attention_forward_original(*args, **kwargs)
-    else:
-        return attention_forward_original(*args, **kwargs)
+from kernl.implementations.attention import attention_forward, attention_reference, closest_power_of_2
+from kernl.implementations.attention_vec_mat import attention_vec_mat_forward
+from kernl.optimizer.cuda_graph import cuda_graphs_wrapper
 
 
 implementations = {
-    "original": lambda q, k, v, output, sm_scale, is_causal, attention_mask: original_triton_flash_attention(
-        is_causal, q, k, v, output, sm_scale
-    ),
     "triton": lambda q, k, v, output, sm_scale, is_causal, attention_mask: attention_forward(
         q, k, v, output, sm_scale, is_causal, attention_mask
     ),
@@ -45,33 +36,38 @@ implementations = {
 }
 
 
-def generate_broadcast_mask(batch, seq_length, dtype=torch.float32):
+def generate_broadcast_mask(
+    batch: int, heads: int, seq_length: int, dhead: int, dtype: torch.Tensor = torch.float32
+) -> torch.Tensor:
     attention_mask = (
         torch.randint(1, seq_length, (batch,), device="cuda")[:, None]
         > torch.arange(0, seq_length, device="cuda")[None, :]
     )
-    attention_mask = attention_mask.to(dtype)
     attention_mask = torch.reshape(attention_mask, (batch, 1, 1, seq_length))
-    attention_mask = (1.0 - attention_mask) * torch.finfo(dtype).min
+    attention_mask = torch.where(attention_mask, 0, float("-inf"))
+    attention_mask = attention_mask.to(dtype)
     return attention_mask
 
 
-def generate_bias_mask(batch, seq_length, dtype=torch.float32):
-    return torch.rand((batch, 48, seq_length, seq_length), dtype=dtype, device="cuda")
+def generate_bias_mask(
+    batch: int, heads: int, seq_length: int, dhead: int, dtype: torch.Tensor = torch.float32
+) -> torch.Tensor:
+    return torch.rand((batch, heads, seq_length, seq_length), dtype=dtype, device="cuda")
 
 
-def generate_none_mask(batch, seq_length, dtype=torch.float32):
+def generate_none_mask(*_) -> None:
     return None
 
 
 @set_seed()
 @pytest.mark.parametrize(
     "shape",
-    [(bs, seq_l) for bs in [1, 8, 32, 64] for seq_l in [16, 33, 64, 128, 256, 384, 512]] + [(32, 32)],
-    ids=lambda x: f"{x[0]}x{x[1]}",
+    [(bs, 48, seq_l, 64) for bs in [1, 8, 32, 64] for seq_l in [8, 16, 32, 33, 64, 128, 256, 257, 384, 512]]
+    + [(8, 1, 1500, 64)],
+    ids=lambda x: f"shape(batch,heads,seq_len,dhead)={x[0]}x{x[1]}x{x[2]}x{x[3]}",
 )
 # fp32 not yet possible because of a bug in triton
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("dtype", [torch.float16], ids=["fp16"])  # TODO reactivate bf16 tests when support comes back
 @pytest.mark.parametrize("is_causal", [True, False], ids=["causal", "non-causal"])
 @pytest.mark.parametrize(
     "mask_fn",
@@ -80,24 +76,26 @@ def generate_none_mask(batch, seq_length, dtype=torch.float32):
 )
 @pytest.mark.parametrize("implementation", implementations.keys())
 def test_benchmark_masked(
-    benchmark, shape: (int, int), implementation: Callable, mask_fn: Callable, dtype: torch.dtype, is_causal: bool
+    benchmark,
+    shape: (int, int, int, int),
+    implementation: Callable,
+    mask_fn: Callable,
+    dtype: torch.dtype,
+    is_causal: bool,
 ):
-    batch, seq_length = shape
-    if implementation == "original" and (dtype == torch.bfloat16 or seq_length != 512):
-        pytest.skip("Original Triton implementation only supports fp16 and seq_length=512")
-    elif implementation == "original" and mask_fn != generate_none_mask:
-        pytest.skip("Original Triton implementation doesn't support masks")
+    batch, heads, seq_length, dhead = shape
 
-    # batch, heads, seq_length, dhead
-    mat_shape = (batch, 48, seq_length, 64)
+    # bf16 reduced precision is sensitive to this value
+    tensor_max_val = 1.0 if dtype == torch.bfloat16 else 2.0
+
     args = {
-        "q": torch.rand(mat_shape, device="cuda"),
-        "k": torch.rand(mat_shape, device="cuda"),
-        "v": torch.rand(mat_shape, device="cuda"),
-        "output": torch.empty(mat_shape, device="cuda"),
+        "q": torch.rand(shape, device="cuda") * tensor_max_val,
+        "k": torch.rand(shape, device="cuda") * tensor_max_val,
+        "v": torch.rand(shape, device="cuda") * tensor_max_val,
+        "output": torch.empty(shape, device="cuda"),
         "sm_scale": 0.3,  # Scaling applied before softmax (sqrt(dhead) in Vaswani et al.)
         "is_causal": is_causal,
-        "attention_mask": mask_fn(batch, seq_length),
+        "attention_mask": mask_fn(batch, heads, seq_length, dhead),
     }
 
     expected = attention_reference(**args)
@@ -106,7 +104,7 @@ def test_benchmark_masked(
     func = implementations[implementation]
     value = benchmark(func, **cast_args)
 
-    check_all_close(a=value.float(), b=expected, atol=1e-1)
+    assert_all_close(a=value.float(), b=expected, atol=1e-1)
 
 
 @set_seed()
@@ -128,7 +126,7 @@ def test_mixed_stride():
     )
     output = torch.empty_like(q)
     attention_forward(q, k, v, output, sm_scale, attention_mask=mask)
-    check_all_close(a=output, b=expected, atol=1e-2)
+    assert_all_close(a=output, b=expected, atol=1e-2)
 
 
 @set_seed()
@@ -144,4 +142,67 @@ def test_cross_attention():
     )
     output = torch.empty_like(q)
     attention_forward(q, k, v, output, sm_scale, attention_mask=mask)
-    check_all_close(a=output, b=expected, atol=1e-2)
+    assert_all_close(a=output, b=expected, atol=1e-2)
+
+
+def test_closest_power_of_2():
+    min_range = 16
+    max_range = 128
+    assert closest_power_of_2(1, min_range=min_range, max_range=max_range) == [8, 16, 32]
+    assert closest_power_of_2(20, min_range=min_range, max_range=max_range) == [16, 32]
+    assert closest_power_of_2(257, min_range=min_range, max_range=max_range) == [64, 128, 256]
+    assert closest_power_of_2(20, min_range=min_range, max_range=max_range) == [16, 32]
+    min_range = 4
+    max_range = 128
+    assert closest_power_of_2(1, min_range=min_range, max_range=max_range) == [2, 4, 8]
+
+
+implementations_skinny_cross_attention = {
+    "torch": lambda output, sm_scale: lambda q, k, v: attention_reference(
+        q=q, k=k, v=v, output=output, sm_scale=sm_scale, is_causal=False, attention_mask=None
+    ),
+    "split-k-parallel": lambda output, sm_scale: lambda q, k, v: skinny_attention_forward(
+        q, k, v, output=output, sm_scale=sm_scale, is_causal=False, attention_mask=None
+    ),
+    "flash-attention": lambda output, sm_scale: lambda q, k, v: attention_forward(
+        q, k, v, output=output, sm_scale=sm_scale, is_causal=False, attention_mask=None
+    ),
+    "vec-mat-mul": lambda output, sm_scale: lambda q, k, v: attention_vec_mat_forward(
+        q=q, k=k, v=v, output=output, sm_scale=sm_scale, is_causal=False, attention_mask=None
+    ),
+}
+
+
+@set_seed()
+@pytest.mark.parametrize(
+    "shape",
+    [(1, 6, 1500, 64), (5, 6, 1500, 64), (1, 16, 1500, 64), (5, 16, 1500, 64), (1, 20, 1500, 64), (5, 20, 1500, 64)],
+    ids=["tiny-beam-1", "tiny-beam-5", "medium-beam-1", "medium-beam-5", "large-beam-1", "large-beam-5"],
+)
+@pytest.mark.parametrize("implementation", implementations_skinny_cross_attention.keys())
+def test_benchmark_skinny_cross_attention(benchmark, implementation, shape):
+    batch, head, seqlen, dhead = shape
+    q = torch.rand((batch, head, 1, dhead), dtype=torch.float16, device="cuda")
+    k = torch.rand((batch, head, seqlen, dhead), dtype=torch.float16, device="cuda")
+    v = torch.rand_like(k)
+    if "vec-mat-mul" in implementation:
+        # change layout from row major (default) to col major to make coalesced memory access in Triton kernel
+        v = v.permute(0, 1, 3, 2).contiguous().permute(0, 1, 3, 2)
+    sm_scale = 0.3
+
+    expected = attention_reference(
+        q=q.float(),
+        k=k.float(),
+        v=v.float(),
+        output=torch.empty_like(q, dtype=torch.float32),
+        sm_scale=sm_scale,
+        is_causal=False,
+        attention_mask=None,
+    )
+    output = torch.empty_like(q)
+    fn = implementations_skinny_cross_attention[implementation](output, sm_scale)
+    r = cuda_graphs_wrapper(fn, [q, k, v])
+    _ = r(q, k, v)[0]
+    result = benchmark(r, q, k, v)[0]
+
+    assert_all_close(a=expected, b=result.float(), atol=1e-2)

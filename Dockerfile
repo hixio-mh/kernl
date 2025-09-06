@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.6.1-devel-ubuntu20.04
+FROM nvidia/cuda:12.0.0-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 ENV CUDA_INSTALL_PATH=/usr/local/cuda/
@@ -18,32 +18,30 @@ RUN apt-get install -y git \
     python3.9 \
     python3.9-distutils \
     python3.9-venv \
-    python3.9-dev
+    python3.9-dev \
+    nano
 
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.8 1 && \
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
   update-alternatives --install /usr/bin/python python /usr/bin/python3.9 2 && \
   update-alternatives --set python /usr/bin/python3.9 && \
-  update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1 && \
+  update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
   update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 2 && \
   update-alternatives --set python3 /usr/bin/python3.9
 
-RUN python3.9 -m ensurepip --default-pip --upgrade
+RUN python3.9 -m ensurepip --default-pip --upgrade && \
+    pip install --upgrade pip
 
-RUN pip install torch --extra-index-url https://download.pytorch.org/whl/cu116
+RUN pip install --pre torch==2.0.0
 
-
-WORKDIR /syncback
+RUN mkdir /syncback
 WORKDIR /kernl
 
 COPY ./setup.py ./setup.py
 COPY ./setup.cfg ./setup.cfg
 COPY ./requirements.txt ./requirements.txt
 COPY ./README.md ./README.md
-COPY ./requirements-benchmark.txt ./requirements-benchmark.txt
-COPY ./src/__init__.py ./src/__init__.py
 COPY ./src/kernl/__init__.py ./src/kernl/__init__.py
 
 
-ENV SKIP_CUDA_ASSERT=1
-RUN pip install -e ".[benchmark]"
+RUN pip install -e .
 COPY ./ ./

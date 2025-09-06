@@ -1,0 +1,189 @@
+# Project information
+site_name: "kernl.ai"
+site_url: https://www.kernl.ai/
+site_author: Lefebvre Sarrut
+site_description: >-
+  Kernl is an open source project that optimizes and accelerates your PyTorch model
+
+# Repository
+repo_name: els-rd/kernl
+repo_url: https://github.com/ELS-RD/kernl
+edit_uri: ""
+
+# Copyright
+copyright: Copyright &copy; 2022-2023 <a href="https://www.lefebvre-sarrut.eu/" target="_blank" rel="noopener">Lefebvre Sarrut</a> –
+  <a href="#__consent">Change cookie settings</a>
+
+# Configuration
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/images/logo.svg
+  favicon: assets/favicon.png
+
+  icon:
+    repo: fontawesome/brands/github
+
+  font:
+    text: Poppins
+    code: Roboto Mono
+
+  palette:
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: blue
+
+  features:
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.path
+    - navigation.prune
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+
+    - search.suggest
+    - search.highlight          # experimental features
+    - search.share              # experimental features
+
+    - toc.follow
+
+    - content.code.copy         # code copy button enabled globally
+    - content.code.annotate     # code annotations enabled globally
+    - content.tabs.link         # all content tabs across the whole documentation site will be linked
+    - content.tooltips          # add tooltips on hover
+
+# Stylesheets
+extra_css:
+  - stylesheets/extra.css
+
+# Javascripts
+extra_javascript:
+  - javascripts/gsap.3.11.0.min.js
+  - javascripts/scrollTrigger.3.11.0.min.js
+  - javascripts/extra.js
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Customization
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ELS-RD/kernl
+      name: Kernl on Github
+    - icon: lefebvre-sarrut/icon-social-ai-blog
+      link: https://ai.lefebvre-sarrut.eu/
+      name: Discover our blog fully dedicated to AI
+  generator: false              # Disable the "Made with Material for MkDocs" footer
+  analytics:
+    provider: google
+    property: G-QC1WFMZK6C
+  consent:
+    title: Cookie consent on kernl.ai
+    description: >-
+      We use cookies to recognize your repeated visits and preferences, as well
+      as to measure the effectiveness of our documentation and whether users
+      find what they're searching for. With your consent, you're helping us to
+      make our documentation better.
+    actions:
+      - accept
+      - reject
+      - manage
+
+# Extensions
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.critic
+  - pymdownx.caret
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.emoji:
+      emoji_index: !!python/name:materialx.emoji.twemoji
+      emoji_generator: !!python/name:materialx.emoji.to_svg
+      options:
+        custom_icons:
+          - overrides/.icons
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.smartsymbols
+
+# Plugins
+plugins:
+  - search
+  - gen-files:
+      scripts:
+      - docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.txt
+  - typeset       # preserves html formatting in the navigation and t.o.c
+  - glightbox     # image zoom functionality plugin
+
+  - privacy:
+      enabled: true
+      external_assets_exclude:
+        - cdn.jsdelivr.net/npm/mathjax@3/*
+      external_links_attr_map:
+        target: _blank
+      external_links_noopener: true
+
+  - optimize:
+      enabled: !ENV [CI, false] # only run on ci (requires 3rd party libraries)
+
+  - mkdocstrings:
+      custom_templates: templates
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: false
+
+watch:
+  - src/kernl
+
+# Page tree
+nav:
+  - Home: index.md
+  - How to:
+      - Get Started: how-to-guides/get-started.md
+      - How to support a new model: how-to-guides/support-new-model.md
+#  - Tutorials:
+#      - Page 1: tutorials/page.md
+  # defer to gen-files + literate-nav
+  - Code Reference: reference/
+  - Contribution guide:
+      - Contributing: contribution-guide/contributing.md
+      - Code of conduct: contribution-guide/code-of-conduct.md
+      - Contributing guidelines: contribution-guide/how-to-contribute.md
+      - Kernel writing conventions: contribution-guide/kernel-writing-conventions.md
+#  - Changelog & FAQ:
+#      - Page 1: changelog/page.md
+  - Blog: https://ai.lefebvre-sarrut.eu/

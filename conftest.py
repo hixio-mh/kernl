@@ -12,15 +12,17 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-
+import gc
 import random
 from contextlib import contextmanager
 
 import pytest
 import torch
+import torch._dynamo as dynamo
 
 from kernl.benchmark.benchmark_fixture import BenchmarkFixture
 from kernl.benchmark.benchmark_session import BenchmarkSession
+from kernl.optimizer.cuda_graph import static_inputs_pool
 
 
 @contextmanager
@@ -28,6 +30,27 @@ def set_seed(seed: int = 0):
     torch.manual_seed(seed=seed)
     random.seed(seed)
     yield
+
+
+@pytest.fixture(autouse=True)
+def reset_kernl_state():
+    cache_limit = dynamo.config.cache_size_limit
+    try:
+        dynamo.config.cache_size_limit = 512
+        dynamo.reset()
+        static_inputs_pool.clear()
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        yield {}
+    except RuntimeError as err:
+        raise err
+    finally:
+        dynamo.config.cache_size_limit = cache_limit
+        static_inputs_pool.clear()
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture(scope="function")
@@ -38,7 +61,7 @@ def benchmark(request):
     return fixture
 
 
-@pytest.mark.trylast
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config):
     config._benchmarksession = BenchmarkSession(config)
 
@@ -60,7 +83,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus):
     yield
 
 
-def check_all_close(a: torch.Tensor, b: torch.Tensor, rtol=0, atol=1e-1) -> None:
+def assert_all_close(a: torch.Tensor, b: torch.Tensor, rtol=0, atol=1e-1) -> None:
     """
     Check that all elements of tensors a and b are within provided thresholds.
     """
@@ -69,7 +92,7 @@ def check_all_close(a: torch.Tensor, b: torch.Tensor, rtol=0, atol=1e-1) -> None
     assert a.device == b.device, f"Devices don't match: {a.device} != {b.device}"
     max_abs_diff = torch.max(torch.abs(a - b))
     rel_diff = torch.abs(a / b)
-    max_rel_diff = torch.max(rel_diff[~torch.isnan(rel_diff)])
+    max_rel_diff = torch.max(rel_diff)
     mismatch_elements = torch.sum(torch.abs(a - b) > atol + rtol * torch.abs(b))
     nb_elements = torch.numel(a)
     msg = (

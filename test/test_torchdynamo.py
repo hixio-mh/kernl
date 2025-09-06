@@ -17,7 +17,6 @@ import dataclasses
 from test.models.bert import (
     get_model_baseline,
     get_model_dynamo_cuda_graphs,
-    get_model_dynamo_nvfuser_ofi,
     get_model_from_hf,
     get_model_optimized,
     get_model_optimized_causal_cuda_graphs,
@@ -28,10 +27,11 @@ from typing import Callable
 
 import pytest
 import torch
-import torchdynamo
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, WhisperForConditionalGeneration, WhisperProcessor
 
-from conftest import check_all_close, set_seed
+from conftest import assert_all_close, set_seed
+
+from kernl.model_optimization import optimize_model
 
 
 @dataclasses.dataclass
@@ -43,7 +43,6 @@ class Implementation:
 
 implementations: [Implementation] = [
     Implementation("baseline", get_model_baseline, is_causal=False),
-    Implementation("dynamo_nvfuser_ofi", get_model_dynamo_nvfuser_ofi, is_causal=False),
     Implementation("dynamo_cuda_graphs", get_model_dynamo_cuda_graphs, is_causal=False),
     Implementation("dynamo_optimized", get_model_optimized, is_causal=False),
     Implementation("dynamo_optimized_cuda_graphs", get_model_optimized_cuda_graphs, is_causal=False),
@@ -51,20 +50,6 @@ implementations: [Implementation] = [
     # benchmark. It's not needed if we are sure the mask is causal, we can use the "assume causal mask optimization".
     Implementation("dynamo_optimizer_cuda_graphs_causal", get_model_optimized_causal_cuda_graphs, is_causal=True),
 ]
-
-
-# try:
-#     # check imports and initialize optimized fp16 onnx model
-#     from test.models.bert import get_bert_optim_fp16_onnx
-#
-#     _ = get_bert_optim_fp16_onnx(get_model_from_hf("bert-base-uncased"))
-#     implementations.append(Implementation("onnx_optim_fp16", get_bert_optim_fp16_onnx, is_causal=False))
-# except ImportError as e:
-#     error = (
-#         f"It seems that you are missing some dependencies: "
-#         f"onnx_optim_fp16 won't be included in benchmarks. \n {str(e)}"
-#     )
-#     warnings.warn(UserWarning(error))
 
 
 @pytest.fixture
@@ -80,17 +65,11 @@ def reference_fp32(request):
 )
 @pytest.mark.parametrize(
     "shape",
-    # TODO add shape 32x32 which may be unstable with T5
-    [(bs, seq_l) for bs in [1, 8, 32] for seq_l in [16, 33, 128, 256, 384, 512] if bs * seq_l < 10000],
+    [(bs, seq_l) for bs in [1, 8, 16, 32] for seq_l in [16, 32, 33, 128, 256, 384, 512] if bs * seq_l < 10000],
     ids=lambda x: f"{x[0]}x{x[1]}",
 )
 @pytest.mark.parametrize("implementation", implementations, ids=lambda v: v.name)
 def test_benchmark_implementations(benchmark, reference_fp32, shape: (int, int), implementation: Implementation):
-    if (
-        "onnx" in implementation.name or "nvfuser" in implementation.name
-    ) and reference_fp32.config.name_or_path != "bert-base-uncased":
-        pytest.skip("Only supported for BERT")
-
     inputs = get_input(reference_fp32, shape, is_causal=implementation.is_causal)
     with torch.inference_mode():
         expected = reference_fp32(**inputs)
@@ -98,12 +77,10 @@ def test_benchmark_implementations(benchmark, reference_fp32, shape: (int, int),
         with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16, cache_enabled=True):
             value = benchmark(model, **inputs)
 
-    torchdynamo.reset()
-
-    check_all_close(value["last_hidden_state"].float(), expected["last_hidden_state"].float(), rtol=1e-1, atol=1e-1)
+    assert_all_close(value["last_hidden_state"].float(), expected["last_hidden_state"].float(), rtol=1e-1, atol=1e-1)
 
     if "pooler_output" in expected:
-        check_all_close(value["pooler_output"].float(), expected["pooler_output"].float(), rtol=1e-1, atol=1e-1)
+        assert_all_close(value["pooler_output"].float(), expected["pooler_output"].float(), rtol=1e-1, atol=1e-1)
 
 
 @set_seed()
@@ -118,14 +95,13 @@ def test_support_shape_change(implementation):
             expected = model_reference_fp32(**pytorch_input)
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16, cache_enabled=True):
                 result = model_tested(**pytorch_input)
-        check_all_close(
+        assert_all_close(
             result["last_hidden_state"].float(), expected["last_hidden_state"].float(), atol=1e-1, rtol=1e-1
         )
 
 
 def test_t5():
-    torchdynamo.config.cache_size_limit = 512
-    tokenizer = AutoTokenizer.from_pretrained("t5-small")
+    tokenizer = AutoTokenizer.from_pretrained("t5-small", model_max_length=512)
     model = AutoModelForSeq2SeqLM.from_pretrained("t5-small")
     model = model.eval().cuda()
     task = "translate English to French: The house is wonderful."
@@ -141,8 +117,8 @@ def test_t5():
         )
         assert "La maison est merveilleuse." in tokenizer.batch_decode(output_sequences, skip_special_tokens=True)[0]
 
-    model.encoder.forward = get_model_optimized(model.encoder.forward)
-    model.decoder.forward = get_model_optimized(model.decoder.forward)
+    optimize_model(model.encoder)
+    optimize_model(model.decoder)
 
     with torch.inference_mode(), torch.autocast(dtype=torch.float16, cache_enabled=True, device_type="cuda"):
         output_sequences = model.generate(
@@ -153,3 +129,37 @@ def test_t5():
             do_sample=False,
         )
         assert "La maison est merveilleuse." in tokenizer.batch_decode(output_sequences, skip_special_tokens=True)[0]
+
+
+@pytest.mark.parametrize("num_beam", [1, 5])
+@pytest.mark.parametrize("implementation", ["reference", "optimized"])
+def test_whisper_hf(benchmark, implementation, num_beam):
+    if implementation == "optimized":
+
+        @staticmethod
+        def fix_reorder_cache(past, beam_idx):
+            reordered_past = ()
+            for layer_past in past:
+                reordered_past += (
+                    tuple(past_state.index_select(0, beam_idx) for past_state in layer_past[:2]) + layer_past[2:],
+                )
+            return reordered_past
+
+        WhisperForConditionalGeneration._reorder_cache = fix_reorder_cache
+
+    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny").to("cuda")
+
+    if implementation == "optimized":
+        optimize_model(model.model.encoder)
+        optimize_model(model.model.decoder)
+
+    processor = WhisperProcessor.from_pretrained("openai/whisper-tiny")
+    inputs = torch.load("test/data/whisper_input.pt")
+    with torch.inference_mode(), torch.autocast(dtype=torch.float16, cache_enabled=True, device_type="cuda"):
+        predicted_ids = benchmark(
+            model.generate, inputs, min_length=25, max_length=25, num_beams=num_beam, do_sample=False
+        )
+        transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True, normalize=True)[0]
+        assert (
+            "mister quilter is the apostle of the middle classes and we are glad to welcome his gospel" == transcription
+        )
